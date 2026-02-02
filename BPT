@@ -1,0 +1,491 @@
+
+import numpy as np 
+import pandas as pd
+import matplotlib.pyplot as plt
+import matplotlib.patheffects as path_effects
+from astropy.io import fits
+from scipy.ndimage.filters import gaussian_filter
+
+
+
+class bpt:
+    def __init__(self,table):
+
+        """Se cargan las columnas importantes de la tabla de datos,
+        como los flujos, sus errores y las masas"""
+
+        self.table = table
+
+        #lineas de emision
+
+        self.oiii = self.table['oiii_5007_flux'].values
+        self.nii = self.table['nii_6584_flux'].values
+        self.hb = self.table['h_beta_flux'].values
+        self.ha = self.table['h_alpha_flux'].values
+        self.oi = self.table['oi_6300_flux'].values
+        self.sii_6718 = self.table['sii_6717_flux'].values
+        self.sii_6732 = self.table['sii_6731_flux'].values
+        self.sii = self.sii_6718 + self.sii_6732
+        # errores en lls flujos de las lineas de emesion
+
+        self.oiii_err = self.table['oiii_5007_flux_err'].values
+        self.nii_err = self.table['nii_6584_flux_err'].values
+        self.hb_err = self.table['h_beta_flux_err'].values
+        self.ha_err = self.table['h_alpha_flux_err'].values
+        self.oi_err = self.table['oi_6300_flux_err'].values
+        self.sii_6716_err = self.table['sii_6717_flux_err'].values
+        self.sii_6731_err = self.table['sii_6731_flux_err'].values
+        self.sii_err = self.sii_6716_err + self.sii_6731_err
+        # masas estelares
+
+        #self.lgm_tot_p2p5 = self.table['lgm_tot_p2p5']
+        #self.lgm_tot_p16 = self.table['lgm_tot_p16']
+        #self.lgm_tot_p50 = self.table['lgm_tot_p50']
+        #self.lgm_tot_p84 = self.table['lgm_tot_p84']
+        #self.lgm_tot_p97p5 = self.table['lgm_tot_p97p5']
+
+        # identificador
+
+        self.id_ = self.table['specObjID'].values
+
+    #---------------FLUJOS----------------------------------------------------------------------------------
+
+
+
+    def axis_values(self,tb=False):
+
+        """ Esta funcion entrega una tabla si tb es True, que contiene las razones de los flujos
+        y la propagacion de error."""
+
+        #razones de flujos
+
+        self.log_oiii_hb_ma = np.ma.log10(self.oiii / self.hb)
+        self.log_oi_ha_ma = np.ma.log10(self.oi / self.ha)
+        self.log_sii_ha_ma = np.ma.log10(self.sii / self.ha)
+
+        self.log_nii_ha_ma = np.ma.log10(self.nii / self.ha)
+
+        #propagacion de errores
+
+        log_nii_ha_err = np.sqrt(((1/(np.log(10)*self.nii))**2)*self.nii_err**2 +((-1/(np.log(10)*self.ha))**2)*self.ha_err**2)
+        log_sii_ha_err = np.sqrt(((1/(np.log(10)*self.sii))**2)*self.sii_err**2 +((-1/(np.log(10)*self.ha))**2)*self.ha_err**2)
+        log_oi_ha_err = np.sqrt(((1/(np.log(10)*self.oi))**2)*self.oi_err**2 +((-1/(np.log(10)*self.ha))**2)*self.ha_err**2)
+
+        log_oiii_hb_err = np.sqrt(((1/(np.log(10)*self.oiii))**2)*self.oiii_err**2 +((-1/(np.log(10)*self.hb))**2)*self.hb_err**2)
+
+        tab_o = pd.DataFrame({'ObjID_1':self.id_,'log_nii_ha':self.log_nii_ha_ma ,'log_sii_ha':self.log_sii_ha_ma ,'log_oi_ha':self.log_oi_ha_ma ,
+                              'log_oiii_hb':self.log_oiii_hb_ma,'log_nii_ha_err':log_nii_ha_err,
+                              'log_oiii_hb_err':log_oiii_hb_err})
+
+        self.tab_o = tab_o
+
+        if tb ==True:
+            return self.tab_o
+
+        else:
+            return self
+
+   #--------------CATEGORIAS Y BPT---------------------------------------------------------------------------------------------
+
+    def sf_line_nii(self,x):
+        return 0.61 / (x - 0.05) + 1.3 #Kauffmann 2003
+    def sf_line_oi(self,x):
+        return  0.73  / (x + 0.595) + 1.33
+    def sf_line_sii(self,x):
+        return 0.72  / (x - 0.32) + 1.3
+    
+    def comp_line(self,x):
+        return 0.61 / (x - 0.465) + 1.19 # Kewley 2006
+
+    def CF10_line(self,x):
+        return 1.01*x +0.48 #Cid Fernandez 2010
+    def kewley_agn_sii(self,x):
+        return 1.89 * x + 0.76
+    def kewley_agn_oi(self,x):
+        """Seyfert/LINER classification line for log([OI]/Ha)."""
+        return 1.18 * x + 1.30
+    #mascaras para tener las categorias segun las relaciones
+
+    def mask_sf(self,x,y,line):
+        if line == 'nii':
+            value = 0.05
+            sf_line = self.sf_line_nii(x)
+        elif line == 'sii':
+            value = 0.32
+            sf_line = self.sf_line_sii(x)
+        elif line == 'oi':
+            value = -0.59
+            sf_line = self.sf_line_oi(x)
+        sf_mask_nii = ((y < sf_line) & (x < value)).filled(False) #SF mascara
+        return sf_mask_nii
+    
+    def mask_comp(self,x,y):
+        comp_mask = ((y > self.sf_line_nii(x)) & (x < 0.05)).filled(False) & \
+                    ((y < self.comp_line(x)) & (x < 0.465)).filled(False)
+        return comp_mask
+    def mask_agn(self,x,y):
+
+        agn_mask_nii = ((x > self.comp_line(y)) |   #AGN mascara
+                        (y > 0.465)).filled(False)
+        return agn_mask_nii
+    def mask_agn_sii(self,x,y):
+        agn_mask_sii = ((x > self.sf_line_sii(y)) |
+                    (y > 0.32)).filled(False)
+        return agn_mask_sii
+    def mask_agn_oi(self,x,y):
+        agn_mask_oi = ((x > self.sf_line_oi(y)) |
+                    (y > -0.59)).filled(False)
+        return agn_mask_oi
+
+    def mask_cf10_liner(self,x,y):
+        liner_mask = self.mask_agn(x,y) & (self.CF10_line(x) < y).filled(False)  #Desde AGN separacion a liner
+        return liner_mask
+    def mask_cf10_seyf(self,x,y):
+        seyf_mask = self.mask_agn(x,y) & (self.CF10_line(x) > y).filled(False)  #Desde AGN separacion a SEYFERT
+        return seyf_mask
+
+
+    def mask(self):
+        tab = self.axis_values(tb=True)
+        x = self.log_oiii_hb_ma
+        y_nii = self.log_nii_ha_ma
+        y_oi = self.log_oi_ha_ma
+        y_sii = self.log_sii_ha_ma
+        tab_m = pd.DataFrame({'ObjID_1':self.id_,'sf_nii':self.mask_sf(x,y_nii,'nii'),'sf_sii':self.mask_sf(x,y_sii,'sii'),'sf_oi':self.mask_sf(x,y_oi,'oi'),
+                              'agn_nii':self.mask_agn(x,y_nii),'agn_sii':self.mask_agn_sii(x,y_sii),'agn_oi':self.mask_agn_oi(x,y_oi),
+                              'comp':self.mask_comp(x,y_nii),'seyfert':self.mask_cf10_seyf(x,y_nii),
+                              'liners':self.mask_cf10_liner(x,y_nii)})
+        self.tab_m = tab_m
+        return self.tab_m
+
+    # En base a las mascaras se realiza las categorias
+
+    def catg(self):
+
+        """Entrega una tabla con la categoria para cada galaxia"""
+
+        tab_m = self.mask()
+        tp = np.zeros(len(tab_m))
+        tab_type = pd.DataFrame({'ObjID_1':self.id_,'type':tp})
+        tab_type['type'][(tab_m['sf_nii'] == True)&(tab_m['sf_sii'] == True)&(tab_m['sf_oi'] == True)] = 'SF'
+        tab_type['type'][tab_m['comp'] == True] = 'COMP'
+        tab_type['type'][tab_m['seyfert'] == True] = 'SEYF'
+        tab_type['type'][tab_m['liners'] == True] = 'LINER'
+        tab_type['type'][(tab_m['agn_nii'] == True)&(tab_m['agn_sii'] == True)&(tab_m['agn_oi'] == True)] = 'AGN'
+        #tab_type['type'][(tab_m['sf'] == False)&(tab_m['comp'] == False)&(tab_m['seyfert'] == False)&(tab_m['liners'] == False)] = 'NODATA'
+
+        return tab_type
+
+    def bpt_diagram(self,type = 'scatter', binsx=None,binsy=None,title=None, arr_bins = None, cmap= 'viridis'):
+
+        """ Entrega un diagrama bpt que puede ser bineado arbitrariamente"""
+
+        if binsx==None and binsy == None:
+            binsx = np.arange(-3,3,0.03)
+            binsy = np.arange(-3,3,0.03)
+        else:
+            binsx = binsx
+            binsy = binsy
+
+        values = self.axis_values(tb=True)
+
+        xx_comp_nii = np.linspace(-2.0, 0.35)
+
+        xx_sf_nii = np.linspace(-1.281, 0.045, int(1e4))
+        xx_sf_sii = np.linspace(-1.55, 0.1, int(1e4))
+        xx_sf_oi = np.linspace(-5, -0.8, int(1e4))
+
+        xx_lin_nii = np.linspace(-0.2, 2, int(1e4))
+        xx_lin_sii = np.linspace(-0.3, 2, int(1e4))
+        xx_lin_oi = np.linspace(-1.12, 2, int(1e4))
+
+        fig, (ax1, ax2,ax3) = plt.subplots(1, 3, sharey=True,figsize=(18, 5))
+        fig.subplots_adjust(wspace=0)
+        ax1.plot(xx_comp_nii, self.comp_line(xx_comp_nii), '-k',c ='k')
+        ax1.plot(xx_sf_nii, self.sf_line_nii(xx_sf_nii), '-k',c ='k')
+        ax1.plot(xx_lin_nii, self.CF10_line(xx_lin_nii), '-k',c ='k')
+        if type == 'contor':
+            Z, xedges, yedges = np.histogram2d(values['log_nii_ha'],values['log_oiii_hb'],bins=[binsx,binsy])
+
+
+            Z = Z.T
+            ZZ = gaussian_filter(Z, sigma=1.2)
+            X, Y = np.meshgrid(xedges[:-1], yedges[:-1])
+
+            ax1.contour(X, Y, ZZ,arr_bins,alpha=0.9,zorder=-2,cmap=cmap)
+        elif type == 'hist':
+            ax1.hist2d(values['log_nii_ha'],values['log_oiii_hb'],bins=[binsx,binsy],cmap=cmap, zorder=-2)
+        elif type == 'scatter':
+            ax1.scatter(values['log_nii_ha'],values['log_oiii_hb'],s=20, facecolors='none', edgecolors='coral')
+
+        ax1.set_ylim(-1.5,1.5)
+        ax1.set_xlim(-1.5,0.8)
+
+
+        ax1.set_xlabel(r'$\mathrm{log([NII]/H\alpha)}$', fontsize=18)
+        ax1.set_ylabel(r'$\mathrm{log([OIII]/H\beta)}$', fontsize=18)
+        ax1.text(-1, -0.5, 'SF', ha='center', fontsize=18, zorder=200, color='navy')
+        ax1.text(-0.5, 0.9, 'AGN', ha='left', fontsize=15, zorder=100, color='purple')
+        ax1.text(-0.19, -0.9, 'Comp', ha='left', fontsize=14, zorder=100, color='green')
+        ax1.text(0.3, -0.5, 'LINERs', ha='left', fontsize=14, zorder=100, color='red')
+        for spine in ax1.spines.values():
+            spine.set_linewidth(2.) # Adjust the linewidth as desired¡
+        ax1.tick_params(width=2,labelsize=15) # Set linewidth for ticks as well
+
+        #ax2.plot(xx_comp_nii, self.comp_line(xx_comp_nii), '-k',c ='white')
+        ax2.plot(xx_sf_sii, self.sf_line_sii(xx_sf_sii), '-k',c ='k')
+        ax2.plot(xx_lin_sii, self.kewley_agn_sii(xx_lin_sii), '-k',c ='k')
+        if type == 'contor':
+            Z, xedges, yedges = np.histogram2d(values['log_sii_ha'],values['log_oiii_hb'],bins=[binsx,binsy])
+
+            Z = Z.T
+            ZZ = gaussian_filter(Z, sigma=1.2)
+            X, Y = np.meshgrid(xedges[:-1], yedges[:-1])
+
+            ax2.contour(X, Y, ZZ,arr_bins,alpha=0.9,zorder=-2,cmap=cmap)
+        elif type == 'hist':
+            ax2.hist2d(values['log_sii_ha'],values['log_oiii_hb'],bins=[binsx,binsy],cmap=cmap, zorder=-2)
+
+        elif type == 'scatter':
+            ax2.scatter(values['log_sii_ha'],values['log_oiii_hb'],s=20, facecolors='none', edgecolors='coral')
+
+        ax2.set_ylim(-1.5,1.5)
+        ax2.set_xlim(-1.5,0.8)
+
+
+        ax2.set_xlabel(r'$\mathrm{log([SII]/H\alpha)}$', fontsize=18)
+
+        ax2.text(-1, -0.5, 'SF', ha='center', fontsize=18, zorder=200, color='navy')
+        ax2.text(-0.5, 0.9, 'AGN', ha='left', fontsize=15, zorder=100, color='purple')
+        #ax1.text(-0.19, -0.9, 'Comp', ha='left', fontsize=14, zorder=100, color='lime')
+        ax2.text(0.3, -0.5, 'LINERs', ha='left', fontsize=14, zorder=100, color='red')
+
+        #txt.set_path_effects([path_effects.Stroke(linewidth=1, foreground='black'),    En el caso de querer ajustar bordes, poner txt_1 = ax2.text(-1.5, 0.5, 'SF', ha='center', fontsize=18, zorder=200, color='navy') y repetir con todos los stextos
+         #             path_effects.Normal()])
+        ax2.set_title(title)
+        for spine in ax2.spines.values():
+            spine.set_linewidth(2.) # Adjust the linewidth as desired
+        ax2.tick_params(width=2,labelsize=15) # Set linewidth for ticks as well
+        # Ajusta 'labelsize' al valor deseado
+
+#............................
+
+
+        #ax3.plot(xx_comp_nii, self.comp_line(xx_comp_nii), '-k',c ='white')
+        ax3.plot(xx_sf_oi, self.sf_line_oi(xx_sf_oi), '-k',c ='k')
+        ax3.plot(xx_lin_oi, self.kewley_agn_oi(xx_lin_oi), '-k',c ='k')
+
+        
+        if type == 'contor':
+
+
+            Z, xedges, yedges = np.histogram2d(values['log_oi_ha'],values['log_oiii_hb'],bins=[binsx,binsy])
+            
+            Z = Z.T
+            ZZ = gaussian_filter(Z, sigma=1.2)
+            X, Y = np.meshgrid(xedges[:-1], yedges[:-1])
+
+            ax3.contour(X, Y, ZZ,arr_bins,alpha=0.9,zorder=-2,cmap=cmap)
+        elif type == 'hist':
+            ax3.hist2d(values['log_oi_ha'],values['log_oiii_hb'],bins=[binsx,binsy],cmap=cmap, zorder=-2)
+            
+        elif type == 'scatter':
+            ax3.scatter(values['log_oi_ha'],values['log_oiii_hb'],s=20, facecolors='none', edgecolors='coral')
+
+        ax3.set_ylim(-1.5,1.5)
+        ax3.set_xlim(-2.5,0.2)
+
+
+        ax3.set_xlabel(r'$\mathrm{log([OI]/H\alpha)}$', fontsize = 18)
+
+        ax3.text(-2.1, -0.5, 'SF', ha='center', fontsize=18, zorder=200, color='navy')
+        ax3.text(-1.2, 0.9, 'AGN', ha='left', fontsize=15, zorder=100, color='purple')
+        #ax3.text(-0.19, -0.9, 'Comp', ha='left', fontsize=14, zorder=100, color='lime')
+        ax3.text(-0.3, -0.3, 'LINERs', ha='left', fontsize=14, zorder=100, color='red')
+        
+        for spine in ax3.spines.values():
+            spine.set_linewidth(2.) # Adjust the linewidth as desired
+        ax3.tick_params(width=2,labelsize=15) # Set linewidth for ticks as well
+        
+    #---------------------------ESTADISTICA PARA LA MASA ESTELAR----------------------------------------------------------------------------
+    def STAT(self,tb=False):
+        table1 = self.catg()
+        self.table1 =table1
+
+        cond = (self.lgm_tot_p2p5>0)&(self.lgm_tot_p16>0)&(self.lgm_tot_p50>0)&(self.lgm_tot_p84>0)&(self.lgm_tot_p97p5>0)
+        self.cond = cond
+        type_ = ['SF','COMP','SEYF','LINER']
+        self.type_=type_
+        return self
+    # PROMEDIO
+    def Mean(self):
+        self.STAT()
+
+        p2_ = list()
+        p16_ = list()
+        p50_ = list()
+        p84_ = list()
+        p97_ = list()
+
+
+        for i in self.type_:
+            p2 = np.mean(self.lgm_tot_p2p5[self.cond&(self.table1['type']==i)])
+            p16 = np.mean(self.lgm_tot_p16[self.cond&(self.table1['type']==i)])
+            p50 = np.mean(self.lgm_tot_p50[self.cond&(self.table1['type']==i)])
+            p84 = np.mean(self.lgm_tot_p84[self.cond&(self.table1['type']==i)])
+            p97 = np.mean(self.lgm_tot_p97p5[self.cond&(self.table1['type']==i)])
+            p2_.append(p2)
+            p16_.append(p16)
+            p50_.append(p50)
+            p84_.append(p84)
+            p97_.append(p97)
+
+        tab = pd.DataFrame({'type':self.type_,'mean_lgm_p2p5':p2_,'mean_lgm_p16':p16_,'mean_lgm_p50':p50_,'mean_lgm_p84':p84_,'mean_lgm_p97p5':p97_})
+
+        return tab
+    # DESVIACION ESTANDAR
+    def Std(self):
+        self.STAT()
+
+        p2_ = list()
+        p16_ = list()
+        p50_ = list()
+        p84_ = list()
+        p97_ = list()
+
+
+        for i in self.type_:
+            p2 = np.std(self.lgm_tot_p2p5[self.cond&(self.table1['type']==i)])
+            p16 = np.std(self.lgm_tot_p16[self.cond&(self.table1['type']==i)])
+            p50 = np.std(self.lgm_tot_p50[self.cond&(self.table1['type']==i)])
+            p84 = np.std(self.lgm_tot_p84[self.cond&(self.table1['type']==i)])
+            p97 = np.std(self.lgm_tot_p97p5[self.cond&(self.table1['type']==i)])
+            p2_.append(p2)
+            p16_.append(p16)
+            p50_.append(p50)
+            p84_.append(p84)
+            p97_.append(p97)
+
+        tab = pd.DataFrame({'type':self.type_,'std_lgm_p2p5':p2_,'std_lgm_p16':p16_,'std_lgm_p50':p50_,'std_lgm_p84':p84_,'std_lgm_p97p5':p97_})
+        return tab
+
+    def stat_tb(self):
+        """Entrega una tabla con los valores de la desviacion estandar y el promedio de las masas estelares"""
+        tb1 = self.Std()
+        tb2 = self.Mean()
+
+        return tb1.merge(tb2, on ='type')
+
+    def distrib(self,lgm = 'lgm_tot_p50',n_bins = 10,methd = 'hist'):
+
+        """ Entrega dos graficos, uno para las distribuciones de las masas estelares y otro
+        para la distribucion acumulada"""
+
+        m = self.STAT()
+        table1 = self.catg()
+        lgm_ = {'lgm_tot_p2p5':self.lgm_tot_p2p5,'lgm_tot_p16':self.lgm_tot_p16,'lgm_tot_p50':self.lgm_tot_p50,
+                    'lgm_tot_p84':self.lgm_tot_p84,'lgm_tot_p97p5':self.lgm_tot_p97p5}
+
+        fig, (ax1,ax2) = plt.subplots(2,sharex=False, sharey=False)
+        fig.subplots_adjust(top=2.6, bottom=0.1, left=0.02, right=0.95, hspace=0.2,
+                            wspace=0.35)
+        ax1.hist(lgm_[lgm][self.cond&(table1['type']=='SF')], bins =n_bins,histtype="step", stacked=True, fill=False,alpha=.9,color='blue', label=r'$\rm SF$')
+        ax1.hist(lgm_[lgm][self.cond&(table1['type']=='COMP')],bins=n_bins,histtype="step",stacked=True, fill=False, alpha=.8, color='red',label=r'$\rm COMP$')
+        ax1.hist(lgm_[lgm][self.cond&(table1['type']=='SEYF')],bins=n_bins, histtype="step", stacked=True, fill=False,alpha=.5,color='green', label=r'$\rm SEYF$')
+        ax1.hist(lgm_[lgm][self.cond&(table1['type']=='LINER')],bins =n_bins, histtype="step",stacked=True, fill=False,alpha=.9,color='orange' ,label=r'$\rm LINER$')
+        ax1.set_xlabel(r'$M_{\odot}$')
+        ax1.set_ylabel(r'Numero de galaxias')
+        ax1.set_title(lgm)
+        ax1.legend(handlelength=0.5, handleheight=1)
+
+        ax1.legend(handlelength=0.5, handleheight=1)
+
+        for spine in ax1.spines.values():
+            spine.set_linewidth(5) # Adjust the linewidth as desired
+        ax1.tick_params(width=10) # Set linewidth for ticks as well
+                
+        x_sf = lgm_[lgm][self.cond&(table1['type']=='SF')]
+        x_comp = lgm_[lgm][self.cond&(table1['type']=='COMP')]
+        x_seyf = lgm_[lgm][self.cond&(table1['type']=='SEYF')]
+        x_lin = lgm_[lgm][self.cond&(table1['type']=='LINER')]
+
+        s_sf = np.sort(x_sf)
+        s_comp = np.sort(x_comp)
+        s_seyf = np.sort(x_seyf)
+        s_lin = np.sort(x_lin)
+
+        p_sf = 1. * np.arange(len(x_sf)) / (len(x_sf) - 1)
+        p_comp = 1. * np.arange(len(x_comp)) / (len(x_comp) - 1)
+        p_seyf = 1. * np.arange(len(x_seyf)) / (len(x_seyf) - 1)
+        p_lin = 1. * np.arange(len(x_lin)) / (len(x_lin) - 1)
+
+        ax2.plot(s_sf, p_sf, c='blue',label=r'$\rm SF$')
+        ax2.plot(s_comp,p_comp, c='red',label=r'$\rm COMP$')
+        ax2.plot(s_seyf,p_seyf, c='green',label=r'$\rm SEYF$')
+        ax2.plot(s_lin,p_lin, c='orange',label=r'$\rm LINER$')
+
+
+        ax2.set_xlabel(r'$M_{\odot}$')
+        ax2.set_ylabel(r'$F(x)$')
+        ax2.set_title(lgm)
+
+        for spine in ax2.spines.values():
+            spine.set_linewidth(10) # Apply the same linewidth
+        ax2.tick_params(width=10) # Set linewidth for ticks as well
+
+    def KS(self,lgm = 'lgm_tot_p50'):
+
+        """Entrega una tabla con los valores del test de kolmogorov-smirnov """
+
+        m = self.STAT()
+        table1 = self.catg()
+
+        p_ = list()
+        v_ =list()
+        str_ = list()
+        nm =['SF-COMP',
+             'SF-SEYF',
+             'COMP-SEYF',
+             'SEYF-LINER',
+             'LINER-SF',
+             'LINER-COMP']
+
+
+        for i in self.type_:
+            for j in self.type_:
+                name = i+'-'+j
+                name =str(name)
+                for k in nm:
+                    if k==name:
+                        v,p = stats.ks_2samp(self.lgm_tot_p50[self.cond&(table1['type']==i)],
+                                         self.lgm_tot_p50[self.cond&(table1['type']==j)], mode='auto')
+
+                        p_.append(p)
+                        v_.append(v)
+                        str_.append(name)
+
+                else:
+                    pass
+
+
+        tab = pd.DataFrame({'combinacion':str_,'KS_lgm_p50_stat':v_,'KS_lgm_p50_pvalue':p_})
+
+        return tab
+
+    def Table(self):
+        """Entrega una tabla con los valores importantes y las categorias"""
+
+        table1 = self.table
+        table2 = self.catg()
+        table3 = self.axis_values(tb=True)
+
+        table_0 = table1.merge(table2,on='ObjID_1')
+
+
+        return table_0.merge(table3,on='ObjID_1')
+
+
+
+
+# EXMPLE
+#bpt(tab).bpt_diagram(type = 'hist',arr_bins = [40,100,300,500,1000],cmap='twilight')
